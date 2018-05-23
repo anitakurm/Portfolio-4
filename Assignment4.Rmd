@@ -107,6 +107,12 @@ precis(m.stan)
 ```
 
 
+okay
+```{r}
+
+```
+
+
 Step 3: Build a regression model predicting Pitch SD from Diagnosis.
 - how is the outcome distributed? (likelihood function)
 - how are the parameters of the likelihood distribution distributed? Which predictors should they be conditioned on?
