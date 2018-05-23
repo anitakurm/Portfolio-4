@@ -40,6 +40,10 @@ brm_out <- brm(MeanES|se(SdES)~1+(1|StudyRef), # Outcome as a function of the pr
                iter = 2000)
 summary(brm_out)
 plot(brm_out)
+#Forrest plot
+brmstools::forest(brm_out,
+       show_data = TRUE,
+       av_name = "Effect size") + geom_vline(aes(xintercept = 0), linetype = "dashed")
 
 
 #PitchSD~1+ Diagnosis (1+ Diagnosis|P)
@@ -70,47 +74,14 @@ d = d_pitch %>%
   group_by(ID_unique) %>% 
   mutate(avgPitchSD = mean(PitchSD)) #take the mean across the trials
 
-#bromance
-brm_out1 <- brm(avgPitchSD ~ 1 + diagnosis  +(1|ID_unique/studynr), # Outcome as a function of the predictors as in lme4. 
-               data=d, # Define the data
-               family=gaussian(), # Define the family. 
-               iter = 2000, warmup = 50, cores = 2)
-summary(brm_out1)
-plot(brm_out1)
 
+#let's standardize the data
 d <- as.data.frame(d)
-d$avgPitchSd.s <- #standardize!!
-
-#from the chapter:
-m.stan <- map2stan( 
-  alist(
-    avgPitchSD ~ dnorm( mu , sigma ) ,
-    mu <- a + b*diagnosis,
-    a ~ dnorm(0,1),
-    b ~ dnorm(0,.2), #we expect the diff btwn two groups to be btwn -0.6 and +0.6. gaussian: all plausible values are in the range equal to 3 std devs on each side; to be skeptical smth more like 0.1
-    sigma ~ dcauchy(0,3)   # Cauchy distribution is a thick-tailed probab - a weakly regularizing prior for SD
-    ) ,
-  data=d)
-precis(m.stan)
-
-
-#Int -0.6 schizophrenics pitch is decreasing (0.6 of sd) - the mean of the true underlying effect that we want to see
-#Se(Int) 0.27 standard error -the std dev divided by the square root of dgrs of freedom - the shaded area that shows uncertainty, area limited by sigma around mu
-#Sd(Int) 0.76 std dev - square root of the variance in the data - a measure of uncertainty
-#Se(Sd(Int)) 0.28 uncertainty of the previous
-
-#for the new study:
-#alpha~dnorm(0,1)
-#beta~dnorm(-0.6,0.27) or (-0.6,0.76) - se or sd - conceptual choice
-#SD heterogenous means of new studies
+d$avgPitchSd.s <- scale(d$avgPitchSD)[,1]
+d$PitchMean.s <- scale(d$PitchMean)[,1]
 
 ```
 
-
-okay
-```{r}
-
-```
 
 
 Step 3: Build a regression model predicting Pitch SD from Diagnosis.
@@ -118,6 +89,69 @@ Step 3: Build a regression model predicting Pitch SD from Diagnosis.
 - how are the parameters of the likelihood distribution distributed? Which predictors should they be conditioned on?
 - use a skeptical/conservative prior for the effects of diagnosis. Remember you'll need to motivate it.
 - Describe and plot the estimates. Evaluate model quality
+
+```{r}
+#simple model without set priors 
+m1 <- brm(avgPitchSd.s ~ diagnosis, 
+          data =d,
+          family = gaussian(),
+          prior = NULL,
+          cores = 3, chain = 3, warmup = 2000, iter = 5000)
+summary(m1)
+
+temp_df <- posterior_samples(m1)
+dens(temp_df$b_diagnosis)
+stanplot(m1)
+plot(m1)
+
+#define some priors          
+m2_formula <- bf(avgPitchSd.s ~ diagnosis + (diagnosis|ID_unique), 
+                 sigma ~ diagnosis + (diagnosis|p|ID_unique)) #define formula #?# log sigma?
+get_prior(m2_formula, d) #examine priors
+
+prior <- c(prior(normal(0,1), class = Intercept), 
+           prior(normal(0,0.5), class = b, coef = diagnosis), 
+           prior(normal(0,0.3), class = b, coef = diagnosis, dpar = sigma),
+           prior(cauchy(0,1), class = Intercept, dpar = sigma) 
+           )
+
+# verify that the priors indeed found their way into Stan's model code
+make_stancode(m2_formula,
+              data = d, family = gaussian(),
+              prior = prior)
+
+#making the model with the priors
+m2 <- brm(m2_formula, 
+          data = d,
+          family = gaussian(),
+          prior = prior,
+          cores = 1, chain = 1, warmup = 1000, iter = 2000, control = list(adapt_delta = 0.9))
+summary(m2)
+stanplot(m2)
+plot(m2)
+
+
+#making meta-analytic model
+#using a meta analytic prior
+prior.m <- c(prior(normal(0,1), class = Intercept), 
+           prior(normal(-0.54,0.23), class = b, coef = diagnosis), #skeptical priors
+           prior(normal(0,0.3), class = b, coef = diagnosis, dpar = sigma),
+           prior(cauchy(0,1), class = Intercept, dpar = sigma) 
+           )
+
+
+m2.m <- brm(m2_formula, 
+          data = d,
+          family = gaussian(),
+          prior = prior.m,
+          cores = 1, chain = 1, warmup = 1000, iter = 2000, control = list(adapt_delta = 0.9))
+
+summary(m2.m)
+stanplot(m2.m)
+plot(m2.m)
+
+```
+
 
 Step 4: Now re-run the model with the meta-analytic prior
 - Describe and plot the estimates. Evaluate model quality
@@ -127,6 +161,30 @@ Step 5: Compare the models
 - Compare posteriors between the two models
 - Compare their relative distance from truth (WAIC)
 - Discuss how they compare and whether any of them is best.
+```{r}
+#plot priors
+x <- seq(-2,2, length=1e5)
+y <- dnorm(x, 0, 0.3) #conserv
+y.m <- dnorm(x, -0.54, 0.23) #meta
+prior_df <- data.frame(x = rep(x,2), y = c(y, y.m), prior = c(rep("conservative", length(y)),
+                                                                   rep("meta", length(y.m))
+                                                                   ))
+ggplot(prior_df, aes(x = x, y = y, color = prior)) + geom_line()+theme_classic()
+
+#plot posterior
+post_samples <- c(posterior_samples(m2)$b_diagnosis, posterior_samples(m2.m)$b_diagnosis)
+post_df <- data.frame(post_samples = post_samples, model = c(rep("sceptical", 1000),
+                                                                   rep("meta", 1000)
+                                                                   ))
+ggplot(post_df, aes(x = post_samples, color = model)) + geom_density(adjust = 1)+theme_classic()
+
+  #compare models:
+waic <- brms::WAIC(m2, m2.m)
+waic
+pacman::p_load(brms)
+weights <- brms::model_weights(m2, m2.m, weights = "waic")
+```
+
 
 Step 6: Prepare a nice write up of the analysis and answer the questions at the top.
 
